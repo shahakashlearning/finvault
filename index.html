@@ -8,15 +8,27 @@
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&family=Playfair+Display:wght@600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer">
 <link rel="stylesheet" href="https://use.fontawesome.com/releases/v6.5.1/css/all.css" crossorigin="anonymous">
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
 <script>
 // ═══════════════════════════════════════════════════
-// FIREBASE — NO CONFIG STORED IN THIS FILE (Maximum Security)
-// Config is entered once per device and stored encrypted in localStorage.
-// This HTML file contains ZERO sensitive information.
+// FIREBASE SYNC LAYER — Per-document real-time sync
 // ═══════════════════════════════════════════════════
+const FB = {
+  db: null, connected: false, listenersOn: false, appReady: false, unsubs: [],
+  syncId: null,
+  get ok() { return !!(this.db && this.connected && this.syncId); }
+};
+
+function fbOp(promise, timeoutMs) {
+  timeoutMs = timeoutMs || 8000;
+  return new Promise(function(resolve) {
+    var timer = setTimeout(function() { resolve({ ok: false, code: 'timeout', msg: 'Firestore timed out' }); }, timeoutMs);
+    promise
+      .then(function() { clearTimeout(timer); resolve({ ok: true }); })
+      .catch(function(e) { clearTimeout(timer); resolve({ ok: false, code: e.code || 'error', msg: e.message }); });
+  });
+}
 </script>
 <style>
 /* ═══════════════════════════════════════════════════
@@ -1004,7 +1016,9 @@ function loadData() {
 async function saveData() {
   try {
     DATA._lastSaved = new Date().toISOString();
-    // Encrypt if key available, otherwise save plain
+    // Save PIN hash separately for encrypted session recovery
+    if (DATA.pin) localStorage.setItem('finvault_pin_hash', DATA.pin);
+    // Encrypt if key available
     if (_encryptionKey) {
       const encrypted = await encryptData(DATA, _encryptionKey);
       localStorage.setItem(DB_KEY, encrypted);
@@ -1013,87 +1027,30 @@ async function saveData() {
     }
     // Show sync indicator
     const syncEl = document.getElementById('sync-status');
-    if (syncEl) {
-      syncEl.style.display = 'inline';
-      syncEl.innerHTML = '<i class="fas fa-spinner fa-spin" style="color:var(--accent);"></i> Syncing...';
-    }
-    // Auto-push to Firebase if configured — REAL-TIME on every change
-    var fbRef = getFirebaseDocRef ? getFirebaseDocRef() : null;
-    if (fbRef) {
-      try {
-        _lastCloudWriteTime = Date.now(); // Set write lock BEFORE push
-        const payload = _encryptionKey ? await encryptData(DATA, _encryptionKey) : JSON.stringify(DATA);
-        await fbRef.set({
-          data: payload,
-          updatedAt: new Date().toISOString()
-        });
-        if (syncEl) {
-          syncEl.innerHTML = '🔒 Cloud synced';
-          setTimeout(() => { syncEl.style.display = 'none'; }, 2500);
-        }
-      } catch(fbErr) {
-        console.error('Firebase sync error:', fbErr);
-        if (syncEl) {
-          syncEl.innerHTML = '⚠️ Local only';
-          setTimeout(() => { syncEl.style.display = 'none'; }, 2500);
-        }
-      }
+    if (syncEl) { syncEl.style.display = 'inline'; syncEl.innerHTML = '💾'; }
+    // Push to Firebase in background (local-first: UI already updated)
+    if (FB.ok) {
+      saveToCloud().then(function() {
+        if (syncEl) { syncEl.innerHTML = '🔒 Synced'; setTimeout(function() { syncEl.style.display = 'none'; }, 2000); }
+      }).catch(function() {
+        if (syncEl) { syncEl.innerHTML = '⚠️ Local'; setTimeout(function() { syncEl.style.display = 'none'; }, 2000); }
+      });
     } else {
-      if (syncEl) {
-        syncEl.innerHTML = '<i class="fas fa-check-circle" style="color:var(--success);"></i> ' + (_encryptionKey ? '🔒 Saved' : 'Saved');
-        setTimeout(() => { syncEl.style.display = 'none'; }, 2000);
-      }
+      if (syncEl) { syncEl.innerHTML = '✅ Saved'; setTimeout(function() { syncEl.style.display = 'none'; }, 1500); }
     }
   } catch(e) {
-    // Fallback to unencrypted
     try { localStorage.setItem(DB_KEY, JSON.stringify(DATA)); } catch(e2) {}
-    showToast('Saved (encryption unavailable)', 'info');
   }
 }
 
 async function syncNow() {
-  var ref = getFirebaseDocRef ? getFirebaseDocRef() : null;
+  
   if (!ref) { showToast('Firebase not connected. Go to Settings to set up.', 'error'); return; }
   showToast('Syncing...');
-  await pullFromFirebase();
+  await syncNow();
 }
 
 // Safe push — checks data count before overwriting cloud
-async function safePushToCloud() {
-  var ref = getFirebaseDocRef ? getFirebaseDocRef() : null;
-  if (!ref) return;
-  try {
-    // Check cloud data count first
-    var doc = await ref.get();
-    if (doc.exists) {
-      var cloudData = doc.data();
-      var cloudPayload = cloudData.data;
-      var cloudItemCount = 0;
-      try {
-        var cp = typeof cloudPayload === 'string' ? JSON.parse(cloudPayload) : cloudPayload;
-        if (!cp._encrypted) { cloudItemCount = (cp.expenses||[]).length + (cp.accounts||[]).length + (cp.investments||[]).length + (cp.income||[]).length; }
-        else { cloudItemCount = -1; } // Encrypted — can't count, trust timestamp
-      } catch(e) { cloudItemCount = -1; }
-      var localItemCount = DATA.expenses.length + DATA.accounts.length + DATA.investments.length + (DATA.income||[]).length;
-      // SAFETY: Don't push if local has significantly less data than cloud (would be data loss)
-      if (cloudItemCount > 0 && localItemCount === 0) {
-        console.log('BLOCKED: Local is empty but cloud has ' + cloudItemCount + ' items. Pulling instead.');
-        await pullFromFirebase();
-        return;
-      }
-    }
-    // Safe to push
-    _lastCloudWriteTime = Date.now();
-    var payload = _encryptionKey ? await encryptData(DATA, _encryptionKey) : JSON.stringify(DATA);
-    await ref.set({ data: payload, updatedAt: new Date().toISOString() });
-  } catch(e) { console.error('Push error:', e.message); }
-}
-
-function pushToDatabase() {
-  // Redirect to sync (safe pull-first approach)
-  syncNow();
-}
-
 function genId(prefix = 'id') { return prefix + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7); }
 
 // ─── SECURITY: PIN Hashing ───
@@ -4712,7 +4669,7 @@ function renderSettings() {
           </div>
           <div style="flex:1; padding:0.6rem; background:var(--bg-input); border-radius:var(--radius-sm); text-align:center;">
             <div style="font-size:0.65rem; color:var(--text-muted); text-transform:uppercase;">Status</div>
-            <div style="font-size:0.88rem; font-weight:600; margin-top:2px; color:${window._firebaseDb ? 'var(--success)' : 'var(--warning)'};">${window._firebaseDb ? 'Connected' : 'Not connected'}</div>
+            <div style="font-size:0.88rem; font-weight:600; margin-top:2px; color:${FB.ok ? 'var(--success)' : 'var(--warning)'};">${FB.ok ? 'Connected' : 'Not connected'}</div>
           </div>
         </div>
         <div style="display:flex; gap:8px; margin-bottom:1rem;">
@@ -4726,11 +4683,11 @@ function renderSettings() {
     <div class="card" style="margin-bottom:1rem;">
       <div class="card-title">☁️ Firebase Cloud Sync</div>
       <div style="margin-top:0.5rem; font-size:0.85rem; color:var(--text-secondary);">
-        <div style="padding:0.75rem; background:${getFirebaseDocRef && getFirebaseDocRef() ? 'var(--success-bg)' : 'var(--warning-bg)'}; border-radius:var(--radius-sm); margin-bottom:1rem; display:flex; align-items:center; gap:10px;">
-          <span style="font-size:1.2rem;">${getFirebaseDocRef && getFirebaseDocRef() ? '✅' : '⚠️'}</span>
+        <div style="padding:0.75rem; background:${FB.ok ? 'var(--success-bg)' : 'var(--warning-bg)'}; border-radius:var(--radius-sm); margin-bottom:1rem; display:flex; align-items:center; gap:10px;">
+          <span style="font-size:1.2rem;">${FB.ok ? '✅' : '⚠️'}</span>
           <div>
-            <div style="font-weight:600;">Status: ${getFirebaseDocRef && getFirebaseDocRef() ? 'Connected — real-time sync active' : 'Not connected'}</div>
-            <div style="font-size:0.72rem; color:var(--text-muted);">${getFirebaseDocRef && getFirebaseDocRef() ? 'Changes sync across all devices with same Sync ID.' : 'Set up Firebase config + Sync ID below.'}</div>
+            <div style="font-weight:600;">Status: ${FB.ok ? 'Connected — real-time sync active' : 'Not connected'}</div>
+            <div style="font-size:0.72rem; color:var(--text-muted);">${FB.ok ? 'Changes sync across all devices with same Sync ID.' : 'Set up Firebase config + Sync ID below.'}</div>
           </div>
         </div>
         <div style="padding:0.75rem; background:var(--bg-input); border-radius:var(--radius-sm); margin-bottom:1rem;">
@@ -4818,180 +4775,219 @@ function clearAllData() {
   }
 }
 
+// ═══════════════════════════════════════════════════
+// FIREBASE — Per-document real-time sync (following proven pattern)
+// ═══════════════════════════════════════════════════
+
 function setupFirebase() {
-  // Save Sync ID first
   var syncIdEl = document.getElementById('firebase-sync-id');
   var syncId = syncIdEl ? syncIdEl.value.trim() : '';
-  if (!syncId) { showToast('Enter a Sync ID (e.g., your email). Use the SAME ID on all devices.', 'error'); return; }
+  if (!syncId) { showToast('Enter a Sync ID (e.g. your email). Same on all devices.', 'error'); return; }
   localStorage.setItem('finvault_sync_id', syncId);
 
-  // Parse config — only needed if not already saved
   var configStr = document.getElementById('firebase-config').value.trim();
   var savedConfig = localStorage.getItem('finvault_firebase_config');
   if (!configStr && savedConfig) {
-    // Config already saved, just update sync ID and reconnect
     initFirebase(JSON.parse(savedConfig));
-    showToast('Sync ID updated. Connecting...');
+    showToast('Reconnected with Sync ID: ' + syncId);
     renderPage('settings');
     return;
   }
-  if (!configStr) { showToast('Paste your Firebase config', 'error'); return; }
+  if (!configStr) { showToast('Paste Firebase config', 'error'); return; }
   try {
-    let config = null;
+    var config = null;
     try { config = JSON.parse(configStr); } catch(e1) {}
     if (!config) {
-      const pairs = {};
-      ['apiKey','authDomain','projectId','storageBucket','messagingSenderId','appId','measurementId','databaseURL'].forEach(key => {
-        [new RegExp(key + '\\s*:\\s*["\']([^"\']+)["\']', 'i'), new RegExp('"' + key + '"\\s*:\\s*["\']([^"\']+)["\']', 'i')].forEach(re => {
-          const match = configStr.match(re);
-          if (match && match[1]) pairs[key] = match[1];
-        });
+      var pairs = {};
+      ['apiKey','authDomain','projectId','storageBucket','messagingSenderId','appId'].forEach(function(key) {
+        var re = new RegExp(key + '\\s*:\\s*["\']([^"\']+)["\']', 'i');
+        var m = configStr.match(re);
+        if (m && m[1]) pairs[key] = m[1];
       });
       if (pairs.apiKey || pairs.projectId) config = pairs;
     }
-    if (!config) {
-      let cleaned = configStr.replace(/^(var|let|const)\s+\w+\s*=\s*/, '').replace(/;\s*$/, '');
-      if (!cleaned.startsWith('{')) cleaned = '{' + cleaned + '}';
-      cleaned = cleaned.replace(/(\w+)\s*:/g, '"$1":').replace(/""/g, '"').replace(/'/g, '"').replace(/,\s*}/g, '}');
-      try { config = JSON.parse(cleaned); } catch(e3) {}
-    }
-    if (!config || !config.apiKey) { showToast('Could not parse config or apiKey missing.', 'error'); return; }
+    if (!config || !config.apiKey) { showToast('Could not find apiKey in config', 'error'); return; }
     localStorage.setItem('finvault_firebase_config', JSON.stringify(config));
     initFirebase(config);
-    showToast('Firebase connected with Sync ID: ' + syncId);
+    showToast('Firebase connected!');
     renderPage('settings');
-  } catch(e) { showToast('Error: ' + e.message, 'error'); }
-}
-
-function disconnectFirebase() {
-  openModal('Disconnect Firebase?', '<p>Your data will remain in the cloud. You can reconnect anytime with the same Sync ID.</p>', '<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-danger" onclick="localStorage.removeItem(\'finvault_firebase_config\');localStorage.removeItem(\'finvault_sync_id\');window._firebaseDb=null;window._firebaseDocId=null;if(_firebaseUnsubscribe)_firebaseUnsubscribe();closeModal();showToast(\'Disconnected\');renderPage(\'settings\');">Yes, Disconnect</button>');
+  } catch(e) { showToast('Config error: ' + e.message, 'error'); }
 }
 
 function initFirebase(config) {
   try {
-    if (!window.firebase) { console.log('Firebase SDK not loaded'); return; }
-    if (firebase.apps.length === 0) firebase.initializeApp(config);
-    window._firebaseDb = firebase.firestore();
-    // Get or prompt for Sync ID
-    var syncId = localStorage.getItem('finvault_sync_id');
-    if (!syncId) {
-      // Don't prompt during initial load — will be set from Settings
-      console.log('Firebase initialized but no Sync ID set. Go to Settings to set one.');
-      return;
+    if (typeof firebase === 'undefined') { console.log('Firebase SDK not loaded'); return; }
+    if (!FB.appReady) {
+      if (!firebase.apps.length) firebase.initializeApp(config);
+      FB.appReady = true;
     }
-    // Use Sync ID hash as document path (same across all devices)
-    window._firebaseDocId = 'vault_' + simpleHash(syncId);
-    window._firebaseUid = window._firebaseDocId; // For backward compat
-    // Auth anonymously (needed for security rules)
-    firebase.auth().signInAnonymously().then(function() {
-      console.log('Firebase connected. Doc:', window._firebaseDocId);
-      pullFromFirebase();
-      setupFirebaseListener();
-    }).catch(function(err) { console.error('Firebase auth:', err.message); });
-  } catch(e) { console.error('Firebase init:', e.message); }
-}
-
-// Simple hash for Sync ID — deterministic across devices
-function simpleHash(str) {
-  var hash = 0;
-  for (var i = 0; i < str.length; i++) {
-    var c = str.charCodeAt(i);
-    hash = ((hash << 5) - hash) + c;
-    hash = hash & hash; // 32-bit int
+    FB.db = firebase.firestore();
+    FB.syncId = localStorage.getItem('finvault_sync_id');
+    if (!FB.syncId) { console.log('No Sync ID set'); return; }
+    FB.connected = true;
+    console.log('Firebase connected. Sync ID:', FB.syncId);
+    // Test access then attach listeners
+    testFirestoreAccess();
+  } catch(e) {
+    FB.connected = false;
+    console.error('Firebase init error:', e.message);
   }
-  return Math.abs(hash).toString(36);
 }
 
-function getFirebaseDocRef() {
-  if (!window._firebaseDb || !window._firebaseDocId) return null;
-  return window._firebaseDb.collection('vaults').doc(window._firebaseDocId);
+async function testFirestoreAccess() {
+  var res = await fbOp(FB.db.collection('_test').doc('ping').set({ t: Date.now() }), 6000);
+  if (res.ok) {
+    showToast('Firebase connected & verified!');
+    FB.db.collection('_test').doc('ping').delete().catch(function(){});
+    // Now push local data to cloud and attach listeners
+    pushAllToCloud();
+    if (!FB.listenersOn) attachFirebaseListeners();
+  } else if (res.code === 'timeout') {
+    FB.connected = false;
+    showToast('Firebase timed out. Add your domain to Firebase Authorized Domains.', 'error');
+  } else {
+    showToast('Firebase error: ' + res.msg, 'error');
+  }
 }
 
-// Pull data from Firebase
-async function pullFromFirebase() {
-  var ref = getFirebaseDocRef();
-  if (!ref) return;
+// Get the Firestore collection path for this user's vault
+function vaultCol(name) {
+  return 'vaults_' + FB.syncId.replace(/[^a-zA-Z0-9]/g, '_') + '_' + name;
+}
+
+// Push all local data to cloud (initial sync)
+async function pushAllToCloud() {
+  if (!FB.ok) return;
+  // Push the entire DATA object as a single document (encrypted if key available)
+  var payload = _encryptionKey ? await encryptData(DATA, _encryptionKey) : JSON.stringify(DATA);
+  var res = await fbOp(FB.db.collection('vaults').doc(FB.syncId.replace(/[^a-zA-Z0-9_@.-]/g, '_')).set({
+    data: payload,
+    updatedAt: new Date().toISOString(),
+    itemCount: DATA.expenses.length + DATA.accounts.length + (DATA.income || []).length
+  }));
+  if (!res.ok) console.error('Push failed:', res.msg);
+}
+
+// Attach real-time listener on the vault document
+function attachFirebaseListeners() {
+  if (!FB.db || FB.listenersOn || !FB.syncId) return;
+  FB.listenersOn = true;
+  var docId = FB.syncId.replace(/[^a-zA-Z0-9_@.-]/g, '_');
+  var unsub = FB.db.collection('vaults').doc(docId).onSnapshot(
+    function(doc) {
+      if (!doc.exists) return;
+      // Ignore if we just wrote (within 3 seconds)
+      if (Date.now() - FB._lastWriteTime < 3000) return;
+      var cloudData = doc.data();
+      var cloudUpdated = cloudData.updatedAt || '';
+      var localUpdated = DATA._lastSaved || '';
+      // Only pull if cloud is genuinely from another device
+      if (cloudUpdated && cloudUpdated !== localUpdated && cloudUpdated > localUpdated) {
+        console.log('Live update from another device');
+        pullFromCloud(cloudData);
+      }
+    },
+    function(err) {
+      console.error('Listener error:', err.code, err.message);
+      if (err.code === 'permission-denied') {
+        FB.connected = false;
+        showToast('Firebase permission denied. Check Firestore rules.', 'error');
+      }
+    }
+  );
+  FB.unsubs.push(unsub);
+}
+
+// Pull cloud data into local
+async function pullFromCloud(cloudData) {
   try {
-    var doc = await ref.get();
-    if (!doc.exists) { console.log('No cloud data yet. Pushing local.'); await saveData(); return; }
-    var cloudData = doc.data();
-    var cloudPayload = cloudData.data;
-    var cloudUpdated = cloudData.updatedAt || '';
-    var localUpdated = DATA._lastSaved || '';
+    var payload = cloudData.data;
+    var parsed = typeof payload === 'string' ? JSON.parse(payload) : payload;
+    if (parsed._encrypted && _encryptionKey) {
+      parsed = await decryptData(payload, _encryptionKey);
+    }
+    // Merge defaults
+    for (var key in DEFAULT_DATA) { if (!(key in parsed)) parsed[key] = JSON.parse(JSON.stringify(DEFAULT_DATA[key])); }
+    DEFAULT_DATA.categories.forEach(function(dc) { if (!parsed.categories.find(function(c) { return c.id === dc.id; })) parsed.categories.unshift(JSON.parse(JSON.stringify(dc))); });
+    // Preserve local PIN
+    var localPin = DATA.pin;
+    DATA = parsed;
+    if (localPin) DATA.pin = localPin;
+    // Save locally without triggering cloud push
+    if (_encryptionKey) { localStorage.setItem(DB_KEY, await encryptData(DATA, _encryptionKey)); }
+    else { localStorage.setItem(DB_KEY, JSON.stringify(DATA)); }
+    if (typeof renderPage === 'function') renderPage(currentPage);
+  } catch(e) { console.error('Pull parse error:', e.message); }
+}
 
-    // Detect if local is a fresh/empty install (no real data yet)
-    var localIsEmpty = (DATA.expenses.length === 0 && DATA.accounts.length === 0 && (DATA.income || []).length === 0 && DATA.investments.length === 0);
+// Write timestamp to prevent echo
+FB._lastWriteTime = 0;
 
-    // Pull cloud data if: cloud exists AND (cloud is newer OR local is empty/fresh)
-    if (cloudPayload && (localIsEmpty || cloudUpdated > localUpdated)) {
-      console.log(localIsEmpty ? 'Fresh device — pulling cloud data.' : 'Cloud is newer. Pulling...');
-      try {
-        var parsed = typeof cloudPayload === 'string' ? JSON.parse(cloudPayload) : cloudPayload;
-        if (parsed._encrypted && _encryptionKey) {
-          parsed = await decryptData(cloudPayload, _encryptionKey);
-        }
-        // Only use cloud if it actually has data (not another empty device)
-        var cloudHasData = parsed.expenses && (parsed.expenses.length > 0 || parsed.accounts && parsed.accounts.length > 0 || parsed.investments && parsed.investments.length > 0);
-        if (!cloudHasData && !localIsEmpty) {
-          console.log('Cloud is also empty. Keeping local.');
-          await saveData();
-          return;
-        }
-        for (var key in DEFAULT_DATA) { if (!(key in parsed)) parsed[key] = JSON.parse(JSON.stringify(DEFAULT_DATA[key])); }
-        DEFAULT_DATA.categories.forEach(function(dc) { if (!parsed.categories.find(function(c) { return c.id === dc.id; })) parsed.categories.unshift(JSON.parse(JSON.stringify(dc))); });
-        // Preserve local PIN (don't overwrite with cloud PIN — each device has its own)
-        var localPin = DATA.pin;
-        DATA = parsed;
-        if (localPin) DATA.pin = localPin;
-        if (_encryptionKey) { localStorage.setItem(DB_KEY, await encryptData(DATA, _encryptionKey)); }
-        else { localStorage.setItem(DB_KEY, JSON.stringify(DATA)); }
+// Save to cloud (called from saveData)
+async function saveToCloud() {
+  if (!FB.ok) return;
+  FB._lastWriteTime = Date.now();
+  try {
+    var payload = _encryptionKey ? await encryptData(DATA, _encryptionKey) : JSON.stringify(DATA);
+    var docId = FB.syncId.replace(/[^a-zA-Z0-9_@.-]/g, '_');
+    var res = await fbOp(FB.db.collection('vaults').doc(docId).set({
+      data: payload,
+      updatedAt: DATA._lastSaved,
+      itemCount: DATA.expenses.length + DATA.accounts.length + (DATA.income || []).length
+    }));
+    if (!res.ok) console.error('Cloud save failed:', res.msg);
+  } catch(e) { console.error('saveToCloud error:', e.message); }
+}
+
+async function syncNow() {
+  if (!FB.ok) { showToast('Firebase not connected. Go to Settings.', 'error'); return; }
+  showToast('Syncing...');
+  try {
+    var docId = FB.syncId.replace(/[^a-zA-Z0-9_@.-]/g, '_');
+    var doc = await FB.db.collection('vaults').doc(docId).get();
+    if (doc.exists) {
+      var cloudData = doc.data();
+      var localEmpty = DATA.expenses.length === 0 && DATA.accounts.length === 0;
+      var cloudItemCount = cloudData.itemCount || 0;
+      // If local is empty and cloud has data, pull cloud
+      if (localEmpty && cloudItemCount > 0) {
+        await pullFromCloud(cloudData);
         showToast('Cloud data synced to this device');
-        if (typeof renderPage === 'function') renderPage(currentPage);
-      } catch(e) { console.error('Cloud parse error:', e.message); showToast('Could not decrypt cloud data. Ensure same PIN on all devices.', 'error'); }
+      } else {
+        // Push local to cloud
+        await saveToCloud();
+        showToast('Synced to cloud');
+      }
     } else {
-      console.log('Local is current.');
-      await saveData();
+      await saveToCloud();
+      showToast('Data pushed to cloud');
     }
-  } catch(e) { console.error('Pull error:', e.message); }
+  } catch(e) { showToast('Sync error: ' + e.message, 'error'); }
 }
 
-// Live listener for real-time cross-device sync
-// Write lock — prevents sync echo (own writes triggering pull)
-var _lastCloudWriteTime = 0;
+function pushToDatabase() { syncNow(); }
 
-function setupFirebaseListener() {
-  var ref = getFirebaseDocRef();
-  if (!ref) return;
-  if (_firebaseUnsubscribe) _firebaseUnsubscribe();
-  _firebaseUnsubscribe = ref.onSnapshot(function(doc) {
-    if (!doc.exists) return;
-    // Ignore snapshots within 5 seconds of our own write (sync echo prevention)
-    if (Date.now() - _lastCloudWriteTime < 5000) {
-      console.log('Ignoring own write echo');
-      return;
-    }
-    var cloudUpdated = (doc.data().updatedAt || '');
-    var localUpdated = (DATA._lastSaved || '');
-    if (cloudUpdated && localUpdated && cloudUpdated !== localUpdated && cloudUpdated > localUpdated) {
-      console.log('Live update from another device. Cloud:', cloudUpdated, 'Local:', localUpdated);
-      pullFromFirebase();
-    }
-  }, function(err) { console.error('Listener:', err.message); });
+function disconnectFirebase() {
+  FB.unsubs.forEach(function(fn) { try { fn(); } catch(e) {} });
+  FB.unsubs = []; FB.listenersOn = false;
+  FB.connected = false; FB.db = null; FB.syncId = null;
+  openModal('Disconnect Firebase?', '<p>Your data remains in the cloud. Reconnect anytime with same Sync ID.</p>',
+    '<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-danger" onclick="localStorage.removeItem(\'finvault_firebase_config\');localStorage.removeItem(\'finvault_sync_id\');closeModal();showToast(\'Disconnected\');renderPage(\'settings\');">Yes, Disconnect</button>');
 }
 
-// Auto-connect Firebase on app load if config exists
 function autoConnectFirebase() {
-  if (window._firebaseDb && window._firebaseUid) return;
-  // Load from localStorage (entered once per device via Settings)
-  const savedConfig = localStorage.getItem('finvault_firebase_config');
-  if (savedConfig) {
+  if (FB.ok) return;
+  var savedConfig = localStorage.getItem('finvault_firebase_config');
+  var savedSyncId = localStorage.getItem('finvault_sync_id');
+  if (savedConfig && savedSyncId) {
     try { initFirebase(JSON.parse(savedConfig)); } catch(e) {}
   }
 }
 
+
 // ─── CLOUD BACKUP SYSTEM ───
 async function forceCloudBackup() {
-  if (!window._firebaseDb || !window._firebaseUid) {
+  if (!FB.ok) {
     // Simulate for local testing — save backup to localStorage
     const backupKey = 'finvault_backup_' + new Date().toISOString().slice(0, 7);
     const backupData = JSON.stringify(DATA);
@@ -5011,7 +5007,7 @@ async function forceCloudBackup() {
   try {
     const monthKey = new Date().toISOString().slice(0, 7);
     const backupData = _encryptionKey ? await encryptData(DATA, _encryptionKey) : JSON.stringify(DATA);
-    await window._firebaseDb.collection('vaults').doc(window._firebaseDocId).collection('backups').doc(monthKey).set({
+    await FB.db.collection('vaults').doc(FB.syncId.replace(/[^a-zA-Z0-9_@.-]/g, '_')).collection('backups').doc(monthKey).set({
       data: backupData,
       createdAt: new Date().toISOString(),
       month: monthKey,
@@ -5050,9 +5046,9 @@ function listCloudBackups() {
   }
   backups.sort((a, b) => b.month.localeCompare(a.month));
 
-  if (window._firebaseDb && window._firebaseUid) {
+  if (FB.ok) {
     // Firebase — fetch from cloud
-    window._firebaseDb.collection('vaults').doc(window._firebaseDocId).collection('backups')
+    FB.db.collection('vaults').doc(FB.syncId.replace(/[^a-zA-Z0-9_@.-]/g, '_')).collection('backups')
       .orderBy('month', 'desc').limit(12).get()
       .then(snapshot => {
         const fbBackups = [];
@@ -5087,8 +5083,8 @@ async function restoreCloudBackup(key, source) {
   if (!confirm('Restore this backup? Your current data will be replaced.')) return;
   try {
     let backupStr = null;
-    if (source === 'cloud' && window._firebaseDb && window._firebaseUid) {
-      const doc = await window._firebaseDb.collection('vaults').doc(window._firebaseDocId).collection('backups').doc(key).get();
+    if (source === 'cloud' && FB.ok) {
+      const doc = await FB.db.collection('vaults').doc(FB.syncId.replace(/[^a-zA-Z0-9_@.-]/g, '_')).collection('backups').doc(key).get();
       if (doc.exists) backupStr = typeof doc.data().data === 'string' ? doc.data().data : JSON.stringify(doc.data().data);
     } else {
       backupStr = localStorage.getItem(key);
@@ -5130,9 +5126,9 @@ async function restoreLatestCloudBackup() {
       if (month > latestMonth) { latestMonth = month; latestKey = key; }
     }
   }
-  if (window._firebaseDb && window._firebaseUid) {
+  if (FB.ok) {
     try {
-      const snapshot = await window._firebaseDb.collection('vaults').doc(window._firebaseDocId).collection('backups').orderBy('month', 'desc').limit(1).get();
+      const snapshot = await FB.db.collection('vaults').doc(FB.syncId.replace(/[^a-zA-Z0-9_@.-]/g, '_')).collection('backups').orderBy('month', 'desc').limit(1).get();
       snapshot.forEach(doc => {
         if (doc.data().month > latestMonth) { latestKey = doc.id; latestSource = 'cloud'; }
       });
