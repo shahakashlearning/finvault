@@ -1021,6 +1021,7 @@ async function saveData() {
     var fbRef = getFirebaseDocRef ? getFirebaseDocRef() : null;
     if (fbRef) {
       try {
+        _lastCloudWriteTime = Date.now(); // Set write lock BEFORE push
         const payload = _encryptionKey ? await encryptData(DATA, _encryptionKey) : JSON.stringify(DATA);
         await fbRef.set({
           data: payload,
@@ -1082,6 +1083,7 @@ async function safePushToCloud() {
       }
     }
     // Safe to push
+    _lastCloudWriteTime = Date.now();
     var payload = _encryptionKey ? await encryptData(DATA, _encryptionKey) : JSON.stringify(DATA);
     await ref.set({ data: payload, updatedAt: new Date().toISOString() });
   } catch(e) { console.error('Push error:', e.message); }
@@ -4954,17 +4956,24 @@ async function pullFromFirebase() {
 }
 
 // Live listener for real-time cross-device sync
-var _firebaseUnsubscribe = null;
+// Write lock — prevents sync echo (own writes triggering pull)
+var _lastCloudWriteTime = 0;
+
 function setupFirebaseListener() {
   var ref = getFirebaseDocRef();
   if (!ref) return;
   if (_firebaseUnsubscribe) _firebaseUnsubscribe();
   _firebaseUnsubscribe = ref.onSnapshot(function(doc) {
     if (!doc.exists) return;
+    // Ignore snapshots within 5 seconds of our own write (sync echo prevention)
+    if (Date.now() - _lastCloudWriteTime < 5000) {
+      console.log('Ignoring own write echo');
+      return;
+    }
     var cloudUpdated = (doc.data().updatedAt || '');
     var localUpdated = (DATA._lastSaved || '');
-    if (cloudUpdated > localUpdated && (new Date(cloudUpdated) - new Date(localUpdated)) > 2000) {
-      console.log('Live update from another device');
+    if (cloudUpdated && localUpdated && cloudUpdated !== localUpdated && cloudUpdated > localUpdated) {
+      console.log('Live update from another device. Cloud:', cloudUpdated, 'Local:', localUpdated);
       pullFromFirebase();
     }
   }, function(err) { console.error('Listener:', err.message); });
