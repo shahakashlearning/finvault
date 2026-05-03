@@ -952,32 +952,38 @@ function loadData() {
   try {
     const stored = localStorage.getItem(DB_KEY);
     if (stored) {
-      // Try plain JSON first (legacy/unencrypted)
       try {
         const parsed = JSON.parse(stored);
         if (!parsed._encrypted) {
           DATA = parsed;
+          // Save PIN hash separately for future encrypted sessions
+          if (DATA.pin) localStorage.setItem('finvault_pin_hash', DATA.pin);
         } else {
           // Encrypted — will be decrypted after PIN unlock
           DATA = JSON.parse(JSON.stringify(DEFAULT_DATA));
           DATA._pendingDecrypt = stored;
+          // Restore PIN hash from separate storage so login works
+          const savedPinHash = localStorage.getItem('finvault_pin_hash');
+          if (savedPinHash) {
+            DATA.pin = savedPinHash;
+          }
           return;
         }
       } catch(e) {
         DATA = JSON.parse(JSON.stringify(DEFAULT_DATA));
+        // Try to restore PIN hash
+        const savedPinHash = localStorage.getItem('finvault_pin_hash');
+        if (savedPinHash) DATA.pin = savedPinHash;
         return;
       }
-      // Merge any new default keys
       for (const key in DEFAULT_DATA) {
         if (!(key in DATA)) DATA[key] = JSON.parse(JSON.stringify(DEFAULT_DATA[key]));
       }
-      // Data migration
       if (!DATA._version || DATA._version < 2) {
         (DATA.income || []).forEach(i => { if (!('accountId' in i)) i.accountId = null; });
         DATA.expenses.forEach(e => { if (!('accountId' in e)) e.accountId = null; });
         DATA._version = 2;
       }
-      // Ensure new categories exist in user's data
       DEFAULT_DATA.categories.forEach(dc => {
         if (!DATA.categories.find(c => c.id === dc.id)) {
           DATA.categories.unshift(JSON.parse(JSON.stringify(dc)));
@@ -985,6 +991,9 @@ function loadData() {
       });
     } else {
       DATA = JSON.parse(JSON.stringify(DEFAULT_DATA));
+      // Check if PIN hash exists from a previous session
+      const savedPinHash = localStorage.getItem('finvault_pin_hash');
+      if (savedPinHash) DATA.pin = savedPinHash;
     }
   } catch(e) {
     DATA = JSON.parse(JSON.stringify(DEFAULT_DATA));
@@ -1342,6 +1351,7 @@ function processPinEntry() {
   } else if (pinMode === 'confirm') {
     if (pinBuffer === pinSetupFirst) {
       DATA.pin = hashedPin;
+      localStorage.setItem('finvault_pin_hash', hashedPin);
       saveData();
       unlockApp();
       showToast('PIN created successfully!');
@@ -1355,6 +1365,8 @@ function processPinEntry() {
     if (hashedPin === DATA.pin || pinBuffer === DATA.pin) {
       // Migrate unhashed pin to hashed
       if (pinBuffer === DATA.pin && DATA.pin.length <= 6 && !DATA.pin.startsWith("h_")) { DATA.pin = hashedPin; saveData(); }
+      // Save PIN hash for future encrypted sessions
+      localStorage.setItem('finvault_pin_hash', DATA.pin);
       unlockApp();
     } else {
       pinError('Incorrect PIN. Try again.');
@@ -1402,6 +1414,8 @@ async function unlockApp() {
   document.getElementById('pin-screen').classList.add('hidden');
   document.getElementById('app').classList.add('active');
   navigateTo('dashboard');
+  // Connect Firebase AFTER unlock (needs encryption key for sync)
+  autoConnectFirebase();
 }
 
 function lockApp() {
