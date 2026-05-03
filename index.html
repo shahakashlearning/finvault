@@ -4893,22 +4893,36 @@ async function pullFromFirebase() {
     var cloudPayload = cloudData.data;
     var cloudUpdated = cloudData.updatedAt || '';
     var localUpdated = DATA._lastSaved || '';
-    if (cloudUpdated > localUpdated) {
-      console.log('Cloud is newer. Pulling...');
+
+    // Detect if local is a fresh/empty install (no real data yet)
+    var localIsEmpty = (DATA.expenses.length === 0 && DATA.accounts.length === 0 && (DATA.income || []).length === 0 && DATA.investments.length === 0);
+
+    // Pull cloud data if: cloud exists AND (cloud is newer OR local is empty/fresh)
+    if (cloudPayload && (localIsEmpty || cloudUpdated > localUpdated)) {
+      console.log(localIsEmpty ? 'Fresh device — pulling cloud data.' : 'Cloud is newer. Pulling...');
       try {
         var parsed = typeof cloudPayload === 'string' ? JSON.parse(cloudPayload) : cloudPayload;
         if (parsed._encrypted && _encryptionKey) {
           parsed = await decryptData(cloudPayload, _encryptionKey);
         }
+        // Only use cloud if it actually has data (not another empty device)
+        var cloudHasData = parsed.expenses && (parsed.expenses.length > 0 || parsed.accounts && parsed.accounts.length > 0 || parsed.investments && parsed.investments.length > 0);
+        if (!cloudHasData && !localIsEmpty) {
+          console.log('Cloud is also empty. Keeping local.');
+          await saveData();
+          return;
+        }
         for (var key in DEFAULT_DATA) { if (!(key in parsed)) parsed[key] = JSON.parse(JSON.stringify(DEFAULT_DATA[key])); }
-        // Merge categories
         DEFAULT_DATA.categories.forEach(function(dc) { if (!parsed.categories.find(function(c) { return c.id === dc.id; })) parsed.categories.unshift(JSON.parse(JSON.stringify(dc))); });
+        // Preserve local PIN (don't overwrite with cloud PIN — each device has its own)
+        var localPin = DATA.pin;
         DATA = parsed;
+        if (localPin) DATA.pin = localPin;
         if (_encryptionKey) { localStorage.setItem(DB_KEY, await encryptData(DATA, _encryptionKey)); }
         else { localStorage.setItem(DB_KEY, JSON.stringify(DATA)); }
         showToast('Cloud data synced to this device');
         if (typeof renderPage === 'function') renderPage(currentPage);
-      } catch(e) { console.error('Cloud parse error:', e.message); }
+      } catch(e) { console.error('Cloud parse error:', e.message); showToast('Could not decrypt cloud data. Ensure same PIN on all devices.', 'error'); }
     } else {
       console.log('Local is current.');
       await saveData();
