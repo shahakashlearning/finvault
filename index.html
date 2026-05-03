@@ -829,8 +829,7 @@ tr:hover td { background: var(--bg-card-hover); }
       </div>
       <div class="top-bar-actions">
         <span id="sync-status" style="font-size:0.68rem; color:var(--text-muted); display:none;"><i class="fas fa-check-circle" style="color:var(--success);"></i> Saved</span>
-        <button class="top-btn" onclick="syncNow()" title="Sync data to storage">🔄 <span class="hide-mobile">Sync</span></button>
-        <button class="top-btn" onclick="pushToDatabase()" title="Push data to database">☁️ <span class="hide-mobile">Push</span></button>
+        <button class="top-btn" onclick="syncNow()" title="Sync with cloud">🔄 <span class="hide-mobile">Sync</span></button>
         <button class="top-btn" onclick="exportData()">📥 <span class="hide-mobile">Export</span></button>
         <button class="top-btn" onclick="lockApp()">🔒</button>
       </div>
@@ -875,6 +874,8 @@ const DEFAULT_DATA = {
     { id: 'cat_savings', name: 'Savings & Investment', icon: 'fa-piggy-bank', color: '#00b894', builtin: true },
     { id: 'cat_rent', name: 'Rent', icon: 'fa-building', color: '#6c5ce7', builtin: true },
     { id: 'cat_family', name: 'Family Transfer', icon: 'fa-users', color: '#e84393', builtin: true },
+    { id: 'cat_ccpay', name: 'Credit Card Payment', icon: 'fa-credit-card', color: '#0984e3', builtin: true },
+    { id: 'cat_ccexp', name: 'Credit Card Expenses', icon: 'fa-credit-card', color: '#d63031', builtin: true },
     { id: 'cat_fuel', name: 'Fuel', icon: 'fa-gas-pump', color: '#fdcb6e', builtin: true },
     { id: 'cat_gas', name: 'Gas', icon: 'fa-fire', color: '#fd79a8', builtin: true },
     { id: 'cat_elec', name: 'Electricity', icon: 'fa-bolt', color: '#74b9ff', builtin: true },
@@ -1050,37 +1051,45 @@ async function saveData() {
 }
 
 async function syncNow() {
-  if (window._firebaseDb && window._firebaseUid) {
-    showToast('Syncing with cloud...');
-    await pullFromFirebase();
-  } else {
-    await saveData();
-    showToast('Saved locally (Firebase not connected)');
-  }
+  var ref = getFirebaseDocRef ? getFirebaseDocRef() : null;
+  if (!ref) { showToast('Firebase not connected. Go to Settings to set up.', 'error'); return; }
+  showToast('Syncing...');
+  await pullFromFirebase();
+}
+
+// Safe push — checks data count before overwriting cloud
+async function safePushToCloud() {
+  var ref = getFirebaseDocRef ? getFirebaseDocRef() : null;
+  if (!ref) return;
+  try {
+    // Check cloud data count first
+    var doc = await ref.get();
+    if (doc.exists) {
+      var cloudData = doc.data();
+      var cloudPayload = cloudData.data;
+      var cloudItemCount = 0;
+      try {
+        var cp = typeof cloudPayload === 'string' ? JSON.parse(cloudPayload) : cloudPayload;
+        if (!cp._encrypted) { cloudItemCount = (cp.expenses||[]).length + (cp.accounts||[]).length + (cp.investments||[]).length + (cp.income||[]).length; }
+        else { cloudItemCount = -1; } // Encrypted — can't count, trust timestamp
+      } catch(e) { cloudItemCount = -1; }
+      var localItemCount = DATA.expenses.length + DATA.accounts.length + DATA.investments.length + (DATA.income||[]).length;
+      // SAFETY: Don't push if local has significantly less data than cloud (would be data loss)
+      if (cloudItemCount > 0 && localItemCount === 0) {
+        console.log('BLOCKED: Local is empty but cloud has ' + cloudItemCount + ' items. Pulling instead.');
+        await pullFromFirebase();
+        return;
+      }
+    }
+    // Safe to push
+    var payload = _encryptionKey ? await encryptData(DATA, _encryptionKey) : JSON.stringify(DATA);
+    await ref.set({ data: payload, updatedAt: new Date().toISOString() });
+  } catch(e) { console.error('Push error:', e.message); }
 }
 
 function pushToDatabase() {
-  if (window._firebaseDb && window._firebaseUid) {
-    var _ref = getFirebaseDocRef(); if (_ref) _ref.set({
-      data: JSON.stringify(DATA),
-      updatedAt: new Date().toISOString()
-    }).then(() => {
-      showToast('Data pushed to Firebase successfully');
-    }).catch((e) => {
-      showToast('Push failed: ' + e.message, 'error');
-    });
-  } else {
-    // No Firebase — offer JSON backup download as alternative
-    const backup = JSON.stringify(DATA, null, 2);
-    const blob = new Blob([backup], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'finvault_push_' + new Date().toISOString().slice(0, 10) + '.json';
-    a.click();
-    URL.revokeObjectURL(url);
-    showToast('Firebase not configured. Backup downloaded instead. Set up Firebase in Settings to enable cloud push.');
-  }
+  // Redirect to sync (safe pull-first approach)
+  syncNow();
 }
 
 function genId(prefix = 'id') { return prefix + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7); }
@@ -2852,13 +2861,13 @@ function executeCCPayment(ccId) {
   var date = document.getElementById('ccpay-date').value;
   if (amount <= 0) { showToast('Enter payment amount', 'error'); return; }
   if (!accountId) { showToast('Select bank account', 'error'); return; }
-  // Debit bank account
+  // Debit bank account for the CC bill payment
   debitAccount(accountId, amount);
-  // Log as expense (CC bill payment is not a new expense — it's paying off existing ones)
-  // We DON'T create a new expense — the expenses were already logged when the CC was used
-  // Instead, we log a transfer-like entry for audit trail
+  // Log CC payment in ccPayments audit trail
   if (!DATA.ccPayments) DATA.ccPayments = [];
   DATA.ccPayments.push({ id: genId('ccpay'), ccId: ccId, amount: String(amount), accountId: accountId, date: date, createdAt: new Date().toISOString() });
+  // Log as CC Payment category expense (this is the bank-to-CC payment, NOT double-counting)
+  DATA.expenses.push({ id: genId('exp'), date: date, amount: String(amount), category: 'cat_ccpay', paymentMethod: 'Net Banking', accountId: accountId, notes: 'CC Bill Payment — ' + cc.name, creditCardId: ccId, splitType: 'Personal', createdAt: new Date().toISOString() });
   saveData(); closeModal();
   showToast(formatCurrency(amount) + ' paid to ' + cc.name + ' from ' + getAccountName(accountId));
   renderPage('accounts');
