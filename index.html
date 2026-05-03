@@ -1008,21 +1008,22 @@ async function saveData() {
       syncEl.innerHTML = '<i class="fas fa-spinner fa-spin" style="color:var(--accent);"></i> Syncing...';
     }
     // Auto-push to Firebase if configured — REAL-TIME on every change
-    if (window._firebaseDb && window._firebaseUid) {
+    var fbRef = getFirebaseDocRef ? getFirebaseDocRef() : null;
+    if (fbRef) {
       try {
         const payload = _encryptionKey ? await encryptData(DATA, _encryptionKey) : JSON.stringify(DATA);
-        await window._firebaseDb.collection('users').doc(window._firebaseUid).set({
+        await fbRef.set({
           data: payload,
           updatedAt: new Date().toISOString()
         });
         if (syncEl) {
-          syncEl.innerHTML = '<i class="fas fa-cloud-upload-alt" style="color:var(--success);"></i> 🔒 Cloud synced';
+          syncEl.innerHTML = '🔒 Cloud synced';
           setTimeout(() => { syncEl.style.display = 'none'; }, 2500);
         }
       } catch(fbErr) {
         console.error('Firebase sync error:', fbErr);
         if (syncEl) {
-          syncEl.innerHTML = '<i class="fas fa-check-circle" style="color:var(--warning);"></i> Local only';
+          syncEl.innerHTML = '⚠️ Local only';
           setTimeout(() => { syncEl.style.display = 'none'; }, 2500);
         }
       }
@@ -1051,7 +1052,7 @@ async function syncNow() {
 
 function pushToDatabase() {
   if (window._firebaseDb && window._firebaseUid) {
-    window._firebaseDb.collection('users').doc(window._firebaseUid).set({
+    var _ref = getFirebaseDocRef(); if (_ref) _ref.set({
       data: JSON.stringify(DATA),
       updatedAt: new Date().toISOString()
     }).then(() => {
@@ -4698,41 +4699,43 @@ function renderSettings() {
     </div>
 
     <div class="card" style="margin-bottom:1rem;">
-      <div class="card-title"><i class="fas fa-plug" style="color:var(--accent);"></i> Firebase Cloud Sync</div>
+      <div class="card-title">☁️ Firebase Cloud Sync</div>
       <div style="margin-top:0.5rem; font-size:0.85rem; color:var(--text-secondary);">
-        <div style="padding:0.75rem; background:${window._firebaseDb ? 'var(--success-bg)' : 'var(--warning-bg)'}; border-radius:var(--radius-sm); margin-bottom:1rem; display:flex; align-items:center; gap:10px;">
-          <i class="fas ${window._firebaseDb ? 'fa-check-circle' : 'fa-exclamation-circle'}" style="color:${window._firebaseDb ? 'var(--success)' : 'var(--warning)'}; font-size:1.2rem;"></i>
+        <div style="padding:0.75rem; background:${getFirebaseDocRef && getFirebaseDocRef() ? 'var(--success-bg)' : 'var(--warning-bg)'}; border-radius:var(--radius-sm); margin-bottom:1rem; display:flex; align-items:center; gap:10px;">
+          <span style="font-size:1.2rem;">${getFirebaseDocRef && getFirebaseDocRef() ? '✅' : '⚠️'}</span>
           <div>
-            <div style="font-weight:600;">Status: ${window._firebaseDb ? 'Connected — real-time cloud sync active' : 'Not connected — data saved locally only'}</div>
-            <div style="font-size:0.72rem; color:var(--text-muted);">${window._firebaseDb ? 'Every change auto-syncs to Firebase. Config saved on this device.' : 'Paste your Firebase config below (one-time setup per device).'}</div>
+            <div style="font-weight:600;">Status: ${getFirebaseDocRef && getFirebaseDocRef() ? 'Connected — real-time sync active' : 'Not connected'}</div>
+            <div style="font-size:0.72rem; color:var(--text-muted);">${getFirebaseDocRef && getFirebaseDocRef() ? 'Changes sync across all devices with same Sync ID.' : 'Set up Firebase config + Sync ID below.'}</div>
           </div>
         </div>
-        ${localStorage.getItem('finvault_firebase_config') ? '<div style="padding:0.5rem; background:var(--info-bg); border-radius:var(--radius-sm); margin-bottom:1rem; font-size:0.78rem;"><i class="fas fa-shield-alt" style="color:var(--info);"></i> Config is saved securely on this device. <strong>No config is stored in the HTML file</strong> — your file is a clean app shell safe to share or host publicly.</div>' : ''}
         <div style="padding:0.75rem; background:var(--bg-input); border-radius:var(--radius-sm); margin-bottom:1rem;">
-          <div style="font-weight:600; margin-bottom:0.5rem;"><i class="fas fa-lock" style="color:var(--success);"></i> Security Model:</div>
+          <div style="font-weight:600; margin-bottom:0.5rem;">🔐 How Cross-Device Sync Works:</div>
           <div style="font-size:0.8rem; line-height:1.8;">
-            • The HTML file contains <strong>zero sensitive data</strong> — no config, no financial data<br>
-            • Firebase config is saved in your <strong>browser's localStorage</strong> (per device)<br>
-            • You paste the config <strong>once per device</strong> — it remembers automatically<br>
-            • All data in Firebase is <strong>AES-256 encrypted</strong> — even Google can't read it<br>
-            • Each device gets a <strong>unique auth UID</strong> — only your sessions access your data
+            1. Paste your Firebase config (one-time per device)<br>
+            2. Enter the <strong>same Sync ID</strong> on every device (e.g., your email)<br>
+            3. All devices with the same Sync ID share the same encrypted data<br>
+            4. Any change on one device instantly appears on all others
           </div>
         </div>
         <div class="form-group">
-          <label class="form-label">${localStorage.getItem('finvault_firebase_config') ? 'Update Firebase Config (currently connected)' : 'Firebase Config (one-time setup)'}</label>
-          <textarea class="form-textarea" id="firebase-config" rows="5" placeholder='Paste your config from Firebase Console:
-
-apiKey: "AIzaSy...",
+          <label class="form-label">🔑 Sync ID (same on all devices)</label>
+          <input type="text" class="form-input" id="firebase-sync-id" placeholder="e.g. akash@gmail.com or any unique phrase" value="${localStorage.getItem('finvault_sync_id') || ''}">
+          <div style="font-size:0.72rem; color:var(--text-muted); margin-top:4px;">Use the SAME Sync ID on every device/browser. This determines which cloud vault you connect to. Use your email for easy remembering.</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Firebase Config</label>
+          <textarea class="form-textarea" id="firebase-config" rows="4" placeholder='apiKey: "AIzaSy...",
 authDomain: "your-project.firebaseapp.com",
 projectId: "your-project",
 storageBucket: "your-project.firebasestorage.app",
 messagingSenderId: "123456789",
 appId: "1:123456789:web:abc123"'></textarea>
-          <div style="font-size:0.72rem; color:var(--text-muted); margin-top:4px;">Firebase Console → ⚙️ Project Settings → Your Apps → Config. Paste once — it saves to this device permanently.</div>
+          <div style="font-size:0.72rem; color:var(--text-muted); margin-top:4px;">Firebase Console → Project Settings → Your Apps → Config.</div>
         </div>
-        <div style="display:flex; gap:8px;">
-          <button class="btn btn-primary" onclick="setupFirebase()"><i class="fas fa-cloud"></i> ${localStorage.getItem('finvault_firebase_config') ? 'Update Connection' : 'Connect Firebase'}</button>
-          ${localStorage.getItem('finvault_firebase_config') ? '<button class="btn btn-danger" onclick="if(confirm(\'Disconnect Firebase on this device? Data stays in cloud.\')){localStorage.removeItem(\'finvault_firebase_config\');window._firebaseDb=null;window._firebaseUid=null;showToast(\'Firebase disconnected\');renderPage(\'settings\');}"><i class="fas fa-unlink"></i> Disconnect</button>' : ''}
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn btn-primary" onclick="setupFirebase()">☁️ ${localStorage.getItem('finvault_firebase_config') ? 'Update Connection' : 'Connect Firebase'}</button>
+          <button class="btn btn-success" onclick="syncNow()">🔄 Sync Now</button>
+          ${localStorage.getItem('finvault_firebase_config') ? '<button class="btn btn-danger" onclick="disconnectFirebase()">Disconnect</button>' : ''}
         </div>
       </div>
     </div>
@@ -4791,63 +4794,52 @@ function clearAllData() {
 }
 
 function setupFirebase() {
-  const configStr = document.getElementById('firebase-config').value.trim();
+  // Save Sync ID first
+  var syncIdEl = document.getElementById('firebase-sync-id');
+  var syncId = syncIdEl ? syncIdEl.value.trim() : '';
+  if (!syncId) { showToast('Enter a Sync ID (e.g., your email). Use the SAME ID on all devices.', 'error'); return; }
+  localStorage.setItem('finvault_sync_id', syncId);
+
+  // Parse config — only needed if not already saved
+  var configStr = document.getElementById('firebase-config').value.trim();
+  var savedConfig = localStorage.getItem('finvault_firebase_config');
+  if (!configStr && savedConfig) {
+    // Config already saved, just update sync ID and reconnect
+    initFirebase(JSON.parse(savedConfig));
+    showToast('Sync ID updated. Connecting...');
+    renderPage('settings');
+    return;
+  }
   if (!configStr) { showToast('Paste your Firebase config', 'error'); return; }
   try {
     let config = null;
-    // Method 1: Try direct JSON parse
     try { config = JSON.parse(configStr); } catch(e1) {}
-    
-    // Method 2: Extract key-value pairs from any format (handles pasted text without braces, line breaks, etc.)
     if (!config) {
       const pairs = {};
-      const knownKeys = ['apiKey','authDomain','projectId','storageBucket','messagingSenderId','appId','measurementId','databaseURL'];
-      knownKeys.forEach(key => {
-        // Match: key: "value" or key: 'value' or "key": "value" — handles commas, line breaks
-        const patterns = [
-          new RegExp(key + '\\s*:\\s*["\']([^"\']+)["\']', 'i'),
-          new RegExp('"' + key + '"\\s*:\\s*["\']([^"\']+)["\']', 'i'),
-        ];
-        patterns.forEach(re => {
+      ['apiKey','authDomain','projectId','storageBucket','messagingSenderId','appId','measurementId','databaseURL'].forEach(key => {
+        [new RegExp(key + '\\s*:\\s*["\']([^"\']+)["\']', 'i'), new RegExp('"' + key + '"\\s*:\\s*["\']([^"\']+)["\']', 'i')].forEach(re => {
           const match = configStr.match(re);
           if (match && match[1]) pairs[key] = match[1];
         });
       });
       if (pairs.apiKey || pairs.projectId) config = pairs;
     }
-
-    // Method 3: Try wrapping in braces and cleaning
     if (!config) {
-      let cleaned = configStr;
-      cleaned = cleaned.replace(/^(var|let|const)\s+\w+\s*=\s*/, '');
-      cleaned = cleaned.replace(/;\s*$/, '');
+      let cleaned = configStr.replace(/^(var|let|const)\s+\w+\s*=\s*/, '').replace(/;\s*$/, '');
       if (!cleaned.startsWith('{')) cleaned = '{' + cleaned + '}';
-      cleaned = cleaned.replace(/(\w+)\s*:/g, '"$1":');
-      cleaned = cleaned.replace(/""/g, '"');
-      cleaned = cleaned.replace(/'/g, '"');
-      cleaned = cleaned.replace(/,\s*}/g, '}');
-      cleaned = cleaned.replace(/,\s*$/, '');
+      cleaned = cleaned.replace(/(\w+)\s*:/g, '"$1":').replace(/""/g, '"').replace(/'/g, '"').replace(/,\s*}/g, '}');
       try { config = JSON.parse(cleaned); } catch(e3) {}
     }
-
-    if (!config || (!config.apiKey && !config.projectId)) {
-      showToast('Could not find apiKey or projectId. Please paste the complete Firebase config.', 'error');
-      return;
-    }
-    if (!config.apiKey) {
-      showToast('apiKey is missing! Find it in Firebase Console → Project Settings → Your Apps.', 'error');
-      return;
-    }
-    // Save config to localStorage
+    if (!config || !config.apiKey) { showToast('Could not parse config or apiKey missing.', 'error'); return; }
     localStorage.setItem('finvault_firebase_config', JSON.stringify(config));
-    // Initialize Firebase
     initFirebase(config);
-    showToast('Firebase connected successfully!');
+    showToast('Firebase connected with Sync ID: ' + syncId);
     renderPage('settings');
-  } catch(e) {
-    showToast('Error: ' + e.message + '. Try pasting as: {"apiKey":"AIza...","projectId":"your-project"}', 'error');
-    console.error('Firebase config parse error:', e);
-  }
+  } catch(e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+function disconnectFirebase() {
+  openModal('Disconnect Firebase?', '<p>Your data will remain in the cloud. You can reconnect anytime with the same Sync ID.</p>', '<button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-danger" onclick="localStorage.removeItem(\'finvault_firebase_config\');localStorage.removeItem(\'finvault_sync_id\');window._firebaseDb=null;window._firebaseDocId=null;if(_firebaseUnsubscribe)_firebaseUnsubscribe();closeModal();showToast(\'Disconnected\');renderPage(\'settings\');">Yes, Disconnect</button>');
 }
 
 function initFirebase(config) {
@@ -4855,74 +4847,90 @@ function initFirebase(config) {
     if (!window.firebase) { console.log('Firebase SDK not loaded'); return; }
     if (firebase.apps.length === 0) firebase.initializeApp(config);
     window._firebaseDb = firebase.firestore();
-    firebase.auth().signInAnonymously().then(function(result) {
-      window._firebaseUid = result.user.uid;
-      localStorage.setItem('finvault_firebase_uid', window._firebaseUid);
-      console.log('Firebase connected. UID:', window._firebaseUid);
-      // PULL existing data from Firebase on connect (merge with local)
+    // Get or prompt for Sync ID
+    var syncId = localStorage.getItem('finvault_sync_id');
+    if (!syncId) {
+      // Don't prompt during initial load — will be set from Settings
+      console.log('Firebase initialized but no Sync ID set. Go to Settings to set one.');
+      return;
+    }
+    // Use Sync ID hash as document path (same across all devices)
+    window._firebaseDocId = 'vault_' + simpleHash(syncId);
+    window._firebaseUid = window._firebaseDocId; // For backward compat
+    // Auth anonymously (needed for security rules)
+    firebase.auth().signInAnonymously().then(function() {
+      console.log('Firebase connected. Doc:', window._firebaseDocId);
       pullFromFirebase();
-      // Set up LIVE LISTENER for real-time sync across devices
       setupFirebaseListener();
-    }).catch(function(err) {
-      console.error('Firebase auth error:', err.message);
-    });
-  } catch(e) { console.error('Firebase init error:', e.message); }
+    }).catch(function(err) { console.error('Firebase auth:', err.message); });
+  } catch(e) { console.error('Firebase init:', e.message); }
 }
 
-// Pull data from Firebase — merges cloud data if newer than local
+// Simple hash for Sync ID — deterministic across devices
+function simpleHash(str) {
+  var hash = 0;
+  for (var i = 0; i < str.length; i++) {
+    var c = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + c;
+    hash = hash & hash; // 32-bit int
+  }
+  return Math.abs(hash).toString(36);
+}
+
+function getFirebaseDocRef() {
+  if (!window._firebaseDb || !window._firebaseDocId) return null;
+  return window._firebaseDb.collection('vaults').doc(window._firebaseDocId);
+}
+
+// Pull data from Firebase
 async function pullFromFirebase() {
-  if (!window._firebaseDb || !window._firebaseUid) return;
+  var ref = getFirebaseDocRef();
+  if (!ref) return;
   try {
-    var doc = await window._firebaseDb.collection('users').doc(window._firebaseUid).get();
-    if (!doc.exists) { console.log('No cloud data yet. Will push local data.'); await saveData(); return; }
+    var doc = await ref.get();
+    if (!doc.exists) { console.log('No cloud data yet. Pushing local.'); await saveData(); return; }
     var cloudData = doc.data();
     var cloudPayload = cloudData.data;
     var cloudUpdated = cloudData.updatedAt || '';
     var localUpdated = DATA._lastSaved || '';
-    // If cloud is newer, use cloud data
     if (cloudUpdated > localUpdated) {
-      console.log('Cloud data is newer. Pulling...');
+      console.log('Cloud is newer. Pulling...');
       try {
         var parsed = typeof cloudPayload === 'string' ? JSON.parse(cloudPayload) : cloudPayload;
-        // Check if encrypted
         if (parsed._encrypted && _encryptionKey) {
           parsed = await decryptData(cloudPayload, _encryptionKey);
         }
-        // Merge defaults for new fields
         for (var key in DEFAULT_DATA) { if (!(key in parsed)) parsed[key] = JSON.parse(JSON.stringify(DEFAULT_DATA[key])); }
+        // Merge categories
+        DEFAULT_DATA.categories.forEach(function(dc) { if (!parsed.categories.find(function(c) { return c.id === dc.id; })) parsed.categories.unshift(JSON.parse(JSON.stringify(dc))); });
         DATA = parsed;
-        // Save locally
-        if (_encryptionKey) {
-          localStorage.setItem(DB_KEY, await encryptData(DATA, _encryptionKey));
-        } else {
-          localStorage.setItem(DB_KEY, JSON.stringify(DATA));
-        }
+        if (_encryptionKey) { localStorage.setItem(DB_KEY, await encryptData(DATA, _encryptionKey)); }
+        else { localStorage.setItem(DB_KEY, JSON.stringify(DATA)); }
         showToast('Cloud data synced to this device');
         if (typeof renderPage === 'function') renderPage(currentPage);
-      } catch(e) { console.error('Cloud decrypt failed:', e.message); }
+      } catch(e) { console.error('Cloud parse error:', e.message); }
     } else {
-      console.log('Local data is current. Pushing to cloud.');
+      console.log('Local is current.');
       await saveData();
     }
   } catch(e) { console.error('Pull error:', e.message); }
 }
 
-// Live listener — any change on Firebase triggers local update
+// Live listener for real-time cross-device sync
 var _firebaseUnsubscribe = null;
 function setupFirebaseListener() {
-  if (!window._firebaseDb || !window._firebaseUid) return;
-  if (_firebaseUnsubscribe) _firebaseUnsubscribe(); // Remove old listener
-  _firebaseUnsubscribe = window._firebaseDb.collection('users').doc(window._firebaseUid)
-    .onSnapshot(function(doc) {
-      if (!doc.exists) return;
-      var cloudUpdated = (doc.data().updatedAt || '');
-      var localUpdated = (DATA._lastSaved || '');
-      // Only pull if cloud is significantly newer (avoid echo from our own save)
-      if (cloudUpdated > localUpdated && (new Date(cloudUpdated) - new Date(localUpdated)) > 2000) {
-        console.log('Live update from another device detected');
-        pullFromFirebase();
-      }
-    }, function(err) { console.error('Listener error:', err.message); });
+  var ref = getFirebaseDocRef();
+  if (!ref) return;
+  if (_firebaseUnsubscribe) _firebaseUnsubscribe();
+  _firebaseUnsubscribe = ref.onSnapshot(function(doc) {
+    if (!doc.exists) return;
+    var cloudUpdated = (doc.data().updatedAt || '');
+    var localUpdated = (DATA._lastSaved || '');
+    if (cloudUpdated > localUpdated && (new Date(cloudUpdated) - new Date(localUpdated)) > 2000) {
+      console.log('Live update from another device');
+      pullFromFirebase();
+    }
+  }, function(err) { console.error('Listener:', err.message); });
 }
 
 // Auto-connect Firebase on app load if config exists
@@ -4957,7 +4965,7 @@ async function forceCloudBackup() {
   try {
     const monthKey = new Date().toISOString().slice(0, 7);
     const backupData = _encryptionKey ? await encryptData(DATA, _encryptionKey) : JSON.stringify(DATA);
-    await window._firebaseDb.collection('users').doc(window._firebaseUid).collection('backups').doc(monthKey).set({
+    await window._firebaseDb.collection('vaults').doc(window._firebaseDocId).collection('backups').doc(monthKey).set({
       data: backupData,
       createdAt: new Date().toISOString(),
       month: monthKey,
@@ -4998,7 +5006,7 @@ function listCloudBackups() {
 
   if (window._firebaseDb && window._firebaseUid) {
     // Firebase — fetch from cloud
-    window._firebaseDb.collection('users').doc(window._firebaseUid).collection('backups')
+    window._firebaseDb.collection('vaults').doc(window._firebaseDocId).collection('backups')
       .orderBy('month', 'desc').limit(12).get()
       .then(snapshot => {
         const fbBackups = [];
@@ -5034,7 +5042,7 @@ async function restoreCloudBackup(key, source) {
   try {
     let backupStr = null;
     if (source === 'cloud' && window._firebaseDb && window._firebaseUid) {
-      const doc = await window._firebaseDb.collection('users').doc(window._firebaseUid).collection('backups').doc(key).get();
+      const doc = await window._firebaseDb.collection('vaults').doc(window._firebaseDocId).collection('backups').doc(key).get();
       if (doc.exists) backupStr = typeof doc.data().data === 'string' ? doc.data().data : JSON.stringify(doc.data().data);
     } else {
       backupStr = localStorage.getItem(key);
@@ -5078,7 +5086,7 @@ async function restoreLatestCloudBackup() {
   }
   if (window._firebaseDb && window._firebaseUid) {
     try {
-      const snapshot = await window._firebaseDb.collection('users').doc(window._firebaseUid).collection('backups').orderBy('month', 'desc').limit(1).get();
+      const snapshot = await window._firebaseDb.collection('vaults').doc(window._firebaseDocId).collection('backups').orderBy('month', 'desc').limit(1).get();
       snapshot.forEach(doc => {
         if (doc.data().month > latestMonth) { latestKey = doc.id; latestSource = 'cloud'; }
       });
